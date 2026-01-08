@@ -1,14 +1,34 @@
 import json
+import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 
+from scapy.all import (
+    ICMP,  # type: ignore
+    IP,  # type: ignore
+    TCP,  # type: ignore
+    UDP,  # type: ignore
+    Ether,  # type: ignore
+    IPv6,  # type: ignore
+    Raw,
+    sniff,
+)
+from tumbling_window import TumblingWindow
+
 OUTPUT_PACKETS_FILE = "data/packet/packet_info.json"
+
 OUTPUT_FLOWS_FILE = "data/flow/flow_summaries.json"
+
 PACKET_CAPTURE_LIMIT = 0
 
+
 packets = []
+
 flows = defaultdict(list)
+
+tumbling = TumblingWindow()
 # the flow key will be a tuple: (src IP, destination IP, src port, dst port, protocol)
+
 """
 1 ICMP
 2 IGMP
@@ -100,10 +120,14 @@ def packet_handler(packet):
         except (IndexError, AttributeError):
             logging.warning("Failed to get payload length")
             info["payload_length"] = 0
-    packets.append(info)
-    flow_key = get_flow_key(packet)
-    if flow_key:
-        flows[flow_key].append(info)
+
+        packets.append(info)
+
+        flow_key = get_flow_key(packet)
+
+        if flow_key:
+            flows[flow_key].append(info)
+        tumbling.add_packet(info, flow_key)
 
 
 def calculate_flow_stats(pkts):
@@ -120,6 +144,13 @@ def calculate_flow_stats(pkts):
         "total_bytes": total_bytes,
         "first_timestamp": min(times),
         "last_timestamp": max(times),
+        "packets_fwd": sum(1 for p in pkts if p.get("src_port", 0) > 0),
+        "bytes_fwd": sum(p["length"] for p in pkts if p.get("src_port", 0) > 0),
+        "packets_bwd": sum(1 for p in pkts if p.get("src_port", 0) == 0),
+        "bytes_bwd": sum(p["length"] for p in pkts if p.get("src_port", 0) == 0),
+        "tcp_flags": sum(
+            1 for p in pkts if p.get("flags_str") and "D" in p["flags_str"]
+        ),
     }
 
 
@@ -136,10 +167,10 @@ def print_flow_summary():
 
         stats = calculate_flow_stats(pkts)
         print(f"Flow: {flow_key}")
-        print(f"  Packets : {stats['packet_count']:3d}")
-        print(f"  Duration: {stats['duration']:6.2f} s")
-        print(f"  Bytes   : {stats['total_bytes']:6d}")
-        print(f"  First   : {stats['first_timestamp']:.2f}")
+        print(f"  Packets : {stats['packet_count']:3d}")  # type: ignore
+        print(f"  Duration: {stats['duration']:6.2f} s")  # type: ignore
+        print(f"  Bytes   : {stats['total_bytes']:6d}")  # type: ignore
+        print(f"  First   : {stats['first_timestamp']:.2f}")  # type: ignore
         print("-" * 60)
 
 
@@ -150,7 +181,7 @@ def save_flow_summaries(filename=OUTPUT_FLOWS_FILE):
             continue
 
         stats = calculate_flow_stats(pkts)
-        summary = {"flow_key": flow_key, **stats}
+        summary = {"flow_key": flow_key, **stats}  # type: ignore
         flow_summaries.append(summary)
 
     try:
@@ -167,8 +198,7 @@ if __name__ == "__main__":
 
         def packet_counter(packet):
             counter["count"] += 1
-            if counter["count"] % 100 == 0:
-                print(f"Captured {counter['count']} packets...", end="\r")
+            print(f"Captured {counter['count']} packets...", end="\r")
             try:
                 packet_handler(packet)
                 counter["success"] += 1
@@ -176,7 +206,7 @@ if __name__ == "__main__":
                 print(f"\nError processing packet {counter['count']}: {e}")
 
         print("Starting packet capture...")
-        sniff(iface="eth0", prn=packet_counter, store=False)
+        sniff(iface=None, prn=packet_counter, store=False)
 
         print(
             f"\nCapture complete. Total packets captured: {counter['count']}, Successfully processed: {counter['success']}"
@@ -194,14 +224,13 @@ if __name__ == "__main__":
             print(f"Error writing to {OUTPUT_PACKETS_FILE}: {e}")
 
         print_flow_summary()
+
         save_flow_summaries()
+
+        # Dump tumbling windows JSON containing windows info and flow state info
+        tumbling.dump_json()
 
     except KeyboardInterrupt:
         print("\nCapture interrupted by user")
     except Exception as e:
         print(f"Error during capture: {e}")
-
-
-"""
-test comment
-"""
