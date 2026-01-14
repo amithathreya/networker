@@ -123,9 +123,13 @@ class TumblingWindow:
             return {"mean_iat": 0.0, "iat_entropy": 0.0, "iat_stddev": 0.0}
         iat_values = np.diff(sorted(packet_timestamps))
         return {
+            # mean 
             "mean_iat": float(np.mean(iat_values)),
+            #shannon entropy calculation
             "iat_entropy": float(-np.sum((np.bincount(iat_values.astype(int)) / len(iat_values)) * np.log2(np.bincount(iat_values.astype(int)) / len(iat_values) + 1e-10))),
+            # standard deviation
             "iat_stddev": float(np.std(iat_values)),
+            #min and max    
             "iat_min": float(np.min(iat_values)),
             "iat_max"  : float(np.max(iat_values))
         }
@@ -138,6 +142,11 @@ class TumblingWindow:
         for flow_key, packet_list in win["flows"].items():
             # Calculate stats specifically for THIS flow in THIS window
             count = len(packet_list)
+            syn_count = sum(1 for p in packet_list if "S" in p.get("flags_str", ""))
+            ack_count = sum(1 for p in packet_list if "A" in p.get("flags_str", ""))
+            rst_count = sum(1 for p in packet_list if "R" in p.get("flags_str", ""))
+            avg_size = sum(p["length"] for p in packet_list) / count
+            is_udp = any(p.get("protocol") == 17 for p in packet_list)
             
             # Calculate IAT for this specific flow
             ts = sorted([p["timestamp_epoch"] for p in packet_list])
@@ -147,14 +156,24 @@ class TumblingWindow:
             # Determine token for this specific flow
             if count == 1:
                 token = "SINGLE_PACKET_WINDOW"
+            elif syn_count > (count*0.9) and avg_iat < 0.001:
+                token = "SYN_FLOOD_ATTACK"
+            elif rst_count > (count * 0.5):
+                token = "CONNECTION_RESET_SCAN"
+            elif is_udp and avg_iat < 0.001:
+                token = "UDP_FLOOD_ATTACK"
+            
+            elif avg_size > 1200 and count > 50:
+                token = "POTENTIAL_EXFILTRATION"
             elif avg_iat < 0.001:
-                token = "BURST_ATTACK"
+                token = "VOLUMETRIC_BURST"
             elif avg_iat > 1.0:
                 token = "LOW_FREQUENCY_WINDOW"
             else:
                 token = "NORMAL_FLOW"
                 
             # Create the combined string
-            flow_lines.append(f"{flow_key} {token}")
+            clean_key = f"{flow_key[0]}_{flow_key[1]}_{flow_key[4]}"
+            flow_lines.append(f"{clean_key} {token}")
             
         return flow_lines # type: ignore

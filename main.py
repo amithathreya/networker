@@ -29,18 +29,19 @@ flows = defaultdict(list)
 tumbling = TumblingWindow()
 # the flow key will be a tuple: (src IP, destination IP, src port, dst port, protocol)
 
-"""
-1 ICMP
-2 IGMP
-6 TCP
-17 UDP
-41 IPV6
-47 GRE
-50 ESP
-51 AH
-58 ICMPV6
-89 OSPF
-"""
+# Protocol number to name mapping
+PROTOCOL_MAP = {
+    1: "ICMP",
+    2: "IGMP",
+    6: "TCP",
+    17: "UDP",
+    41: "IPv6",
+    47: "GRE",
+    50: "ESP",
+    51: "AH",
+    58: "ICMPv6",
+    89: "OSPF",
+}
 
 
 def get_flow_key(packet):
@@ -120,37 +121,45 @@ def packet_handler(packet):
         except (IndexError, AttributeError):
             logging.warning("Failed to get payload length")
             info["payload_length"] = 0
+    
+    packets.append(info)
 
-        packets.append(info)
+    flow_key = get_flow_key(packet)
 
-        flow_key = get_flow_key(packet)
-
-        if flow_key:
-            flows[flow_key].append(info)
-        tumbling.add_packet(info, flow_key)
+    if flow_key:
+        flows[flow_key].append(info)
+    tumbling.add_packet(info, flow_key)
 
 
-def calculate_flow_stats(pkts):
+def calculate_flow_stats(pkts,flow_key):
     if not pkts:
         return None
 
     times = [p["timestamp_epoch"] for p in pkts]
     duration = max(times) - min(times) if len(times) > 1 else 0
     total_bytes = sum(p["length"] for p in pkts)
+    anchor_ip = flow_key[0]
+    protocol_num = flow_key[4]
+    protocol_name = PROTOCOL_MAP.get(protocol_num, f"Unknown({protocol_num})")
+
+    fwd_pkts = [p for p in pkts if p.get("src_ip") == anchor_ip]
+    bwd_pkts = [p for p in pkts if p.get("src_ip") != anchor_ip]
 
     return {
+        "protocol_name": protocol_name,
         "packet_count": len(pkts),
         "duration": duration,
         "total_bytes": total_bytes,
         "first_timestamp": min(times),
         "last_timestamp": max(times),
-        "packets_fwd": sum(1 for p in pkts if p.get("src_port", 0) > 0),
-        "bytes_fwd": sum(p["length"] for p in pkts if p.get("src_port", 0) > 0),
-        "packets_bwd": sum(1 for p in pkts if p.get("src_port", 0) == 0),
-        "bytes_bwd": sum(p["length"] for p in pkts if p.get("src_port", 0) == 0),
-        "tcp_flags": sum(
-            1 for p in pkts if p.get("flags_str") and "D" in p["flags_str"]
-        ),
+        "packets_fwd": len(fwd_pkts),
+        "bytes_fwd": sum(p["length"] for p in fwd_pkts),
+        "packets_bwd": len(bwd_pkts),
+        "bytes_bwd": sum(p["length"] for p in bwd_pkts),
+        "syn_count": sum(1 for p in pkts if "S" in p.get("flags_str", "")),
+        "rst_count": sum(1 for p in pkts if "R" in p.get("flags_str", "")),
+        "ack_count": sum(1 for p in pkts if "A" in p.get("flags_str", "")),
+        "fin_count": sum(1 for p in pkts if "F" in p.get("flags_str", ""))  
     }
 
 
@@ -165,7 +174,7 @@ def print_flow_summary():
         if not pkts:
             continue
 
-        stats = calculate_flow_stats(pkts)
+        stats = calculate_flow_stats(pkts,flow_key=flow_key)
         print(f"Flow: {flow_key}")
         print(f"  Packets : {stats['packet_count']:3d}")  # type: ignore
         print(f"  Duration: {stats['duration']:6.2f} s")  # type: ignore
@@ -180,7 +189,7 @@ def save_flow_summaries(filename=OUTPUT_FLOWS_FILE):
         if not pkts:
             continue
 
-        stats = calculate_flow_stats(pkts)
+        stats = calculate_flow_stats(pkts,flow_key=flow_key)
         summary = {"flow_key": flow_key, **stats}  # type: ignore
         flow_summaries.append(summary)
 
@@ -206,7 +215,7 @@ if __name__ == "__main__":
                 print(f"\nError processing packet {counter['count']}: {e}")
 
         print("Starting packet capture...")
-        sniff(iface=None, prn=packet_counter, store=False)
+        sniff(iface="Realtek RTL8852BE WiFi 6 802.11ax PCIe Adapter", prn=packet_counter, store=False)
 
         print(
             f"\nCapture complete. Total packets captured: {counter['count']}, Successfully processed: {counter['success']}"
